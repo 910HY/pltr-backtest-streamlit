@@ -26,6 +26,10 @@ interval = st.sidebar.selectbox("數據頻率", ["1d", "1h"], index=0)
 start_date = st.sidebar.date_input("開始日期", value=datetime(2023, 1, 1))
 end_date = st.sidebar.date_input("結束日期", value=datetime.now())
 
+st.sidebar.subheader("策略選擇")
+selected_strategies = st.sidebar.multiselect(
+    "選擇要納入的策略", ["SMA", "RSI", "MACD", "Bollinger Bands", "Trendline"], default=["SMA", "RSI", "MACD"])
+
 st.sidebar.subheader("參數範圍")
 short_ma_range = st.sidebar.slider("短期 MA", 5, 100, (10, 50), step=10)
 long_ma_range = st.sidebar.slider("長期 MA", 20, 300, (60, 200), step=20)
@@ -49,40 +53,52 @@ def load_data(ticker):
 
 def backtest(df, short_ma, long_ma, rsi_period, macd_fast, macd_slow, macd_signal, boll_window, boll_std):
     df = df.copy()
-    df['short_ma'] = df['Close'].rolling(window=short_ma).mean()
-    df['long_ma'] = df['Close'].rolling(window=long_ma).mean()
-    delta = df['Close'].diff()
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=rsi_period).mean()
-    avg_loss = pd.Series(loss).rolling(window=rsi_period).mean()
-    rs = avg_gain / avg_loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    ema_fast = df['Close'].ewm(span=macd_fast, adjust=False).mean()
-    ema_slow = df['Close'].ewm(span=macd_slow, adjust=False).mean()
-    df['MACD'] = ema_fast - ema_slow
-    df['MACD_signal'] = df['MACD'].ewm(span=macd_signal, adjust=False).mean()
-    df['boll_mid'] = df['Close'].rolling(window=boll_window).mean()
-    df['boll_std'] = df['Close'].rolling(window=boll_window).std()
-    df['boll_upper'] = df['boll_mid'] + boll_std * df['boll_std']
-    df['boll_lower'] = df['boll_mid'] - boll_std * df['boll_std']
 
-    # 趨勢線（線性回歸）
-    if len(df) > 10:
+    if "SMA" in selected_strategies:
+        df['short_ma'] = df['Close'].rolling(window=short_ma).mean()
+        df['long_ma'] = df['Close'].rolling(window=long_ma).mean()
+    if "RSI" in selected_strategies:
+        delta = df['Close'].diff()
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = pd.Series(gain).rolling(window=rsi_period).mean()
+        avg_loss = pd.Series(loss).rolling(window=rsi_period).mean()
+        rs = avg_gain / avg_loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+    if "MACD" in selected_strategies:
+        ema_fast = df['Close'].ewm(span=macd_fast, adjust=False).mean()
+        ema_slow = df['Close'].ewm(span=macd_slow, adjust=False).mean()
+        df['MACD'] = ema_fast - ema_slow
+        df['MACD_signal'] = df['MACD'].ewm(span=macd_signal, adjust=False).mean()
+    if "Bollinger Bands" in selected_strategies:
+        df['boll_mid'] = df['Close'].rolling(window=boll_window).mean()
+        df['boll_std'] = df['Close'].rolling(window=boll_window).std()
+        df['boll_upper'] = df['boll_mid'] + boll_std * df['boll_std']
+        df['boll_lower'] = df['boll_mid'] - boll_std * df['boll_std']
+    if "Trendline" in selected_strategies:
         x = np.arange(len(df)).reshape(-1, 1)
         y = df['Close'].values.reshape(-1, 1)
         model = LinearRegression().fit(x, y)
         df['trend'] = model.predict(x)
-    else:
-        df['trend'] = df['Close']
 
-    df['signal'] = np.where(
-        (df['short_ma'] > df['long_ma']) &
-        (df['RSI'] < 70) &
-        (df['MACD'] > df['MACD_signal']) &
-        (df['Close'] > df['boll_mid']) &
-        (df['Close'] > df['trend']),
-        1, 0)
+    # 建立信號條件
+    conditions = []
+    if "SMA" in selected_strategies:
+        conditions.append(df['short_ma'] > df['long_ma'])
+    if "RSI" in selected_strategies:
+        conditions.append(df['RSI'] < 70)
+    if "MACD" in selected_strategies:
+        conditions.append(df['MACD'] > df['MACD_signal'])
+    if "Bollinger Bands" in selected_strategies:
+        conditions.append(df['Close'] > df['boll_mid'])
+    if "Trendline" in selected_strategies:
+        conditions.append(df['Close'] > df['trend'])
+
+    if conditions:
+        df['signal'] = np.where(np.logical_and.reduce(conditions), 1, 0)
+    else:
+        df['signal'] = 0
+
     df['returns'] = df['Close'].pct_change()
     df['strategy'] = df['returns'] * df['signal'].shift(1)
     df['equity'] = START_EQUITY * (1 + df['strategy']).cumprod()
@@ -94,15 +110,7 @@ def backtest(df, short_ma, long_ma, rsi_period, macd_fast, macd_slow, macd_signa
     annualized_volatility = df['strategy'].std() * np.sqrt(252)
     sharpe_ratio = annualized_return / annualized_volatility if annualized_volatility != 0 else 0
 
-    return {
-        "短期MA": short_ma,
-        "長期MA": long_ma,
-        "RSI週期": rsi_period,
-        "MACD快線": macd_fast,
-        "MACD慢線": macd_slow,
-        "MACD信號": macd_signal,
-        "布林週期": boll_window,
-        "布林倍數": boll_std,
+    return df, {
         "總報酬率": final_return,
         "最大回撤": max_drawdown,
         "Sharpe Ratio": sharpe_ratio
@@ -112,29 +120,28 @@ if run_button:
     for ticker in selected_tickers:
         st.subheader(f"股票：{ticker}")
         df = load_data(ticker)
-        result_list = []
-        for short_ma, long_ma in product(
-            range(short_ma_range[0], short_ma_range[1]+1, 10),
-            range(long_ma_range[0], long_ma_range[1]+1, 20)):
-            if short_ma >= long_ma:
-                continue
-            for rsi in range(rsi_range[0], rsi_range[1]+1, 5):
-                for fast in range(macd_fast_range[0], macd_fast_range[1]+1, 2):
-                    for slow in range(macd_slow_range[0], macd_slow_range[1]+1, 2):
-                        if fast >= slow:
-                            continue
-                        for signal in range(macd_signal_range[0], macd_signal_range[1]+1, 1):
-                            for boll_w in range(boll_window_range[0], boll_window_range[1]+1, 5):
-                                for boll_s in np.arange(boll_std_range[0], boll_std_range[1]+0.1, 0.5):
-                                    res = backtest(df, short_ma, long_ma, rsi, fast, slow, signal, boll_w, boll_s)
-                                    result_list.append(res)
+        df, stats = backtest(df,
+            short_ma_range[0], long_ma_range[1],
+            rsi_range[0], macd_fast_range[0], macd_slow_range[1], macd_signal_range[0],
+            boll_window_range[0], boll_std_range[0]
+        )
 
-        results_df = pd.DataFrame(result_list)
-        results_df = results_df.sort_values(by="Sharpe Ratio", ascending=False).reset_index(drop=True)
-        st.write("參數設定範圍：")
-        st.code(f"短期 MA: {short_ma_range}, 長期 MA: {long_ma_range}, RSI: {rsi_range}, MACD: {macd_fast_range}/{macd_slow_range}/{macd_signal_range}, Boll: {boll_window_range}, Std: {boll_std_range}")
-        st.dataframe(results_df)
+        st.metric("總報酬率", f"{stats['總報酬率']:.2%}")
+        st.metric("最大回撤", f"{stats['最大回撤']:.2%}")
+        st.metric("Sharpe Ratio", f"{stats['Sharpe Ratio']:.2f}")
 
-        if not results_df.empty:
-            best = results_df.iloc[0]
-            st.success(f"最佳策略：短期 MA={best['短期MA']}, 長期 MA={best['長期MA']}, RSI={best['RSI週期']}, Sharpe={best['Sharpe Ratio']:.2f}")
+        # 對比 SPY benchmark
+        spy_df = yf.download("SPY", start=start_date, end=end_date, interval=interval)
+        if spy_df.empty and interval == "1h":
+            spy_df = yf.download("SPY", start=start_date, end=end_date, interval="1d")
+        spy_df.dropna(inplace=True)
+        spy_df['spy_return'] = spy_df['Close'].pct_change()
+        spy_df['spy_equity'] = START_EQUITY * (1 + spy_df['spy_return']).cumprod()
+
+        common_index = df.index.intersection(spy_df.index)
+        equity_compare = pd.DataFrame({
+            '策略資產': df.loc[common_index, 'equity'],
+            'SPY 持有': spy_df.loc[common_index, 'spy_equity']
+        })
+
+        st.line_chart(equity_compare, height=350, use_container_width=True)
