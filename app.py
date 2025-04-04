@@ -4,72 +4,86 @@ import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
 from datetime import datetime
+from itertools import product
 
-# Streamlit App UI
-st.title("PLTR 回測平台")
-st.markdown("這是一個簡單的回測平台，支援自動下載 PLTR 歷史數據並測試移動平均策略。")
+# 標題
+st.title("美股回測平台：策略參數優化")
+st.markdown("支援多股票回測、自動尋找最佳移動平均參數（SMA 交叉策略）。")
 
-# 策略參數
-st.sidebar.header("策略參數")
-short_window = st.sidebar.number_input("短期移動平均線 (日)", min_value=1, max_value=100, value=20)
-long_window = st.sidebar.number_input("長期移動平均線 (日)", min_value=1, max_value=300, value=50)
-interval = st.sidebar.selectbox("數據頻率", ["1d", "1h", "15m"], index=0)
+START_EQUITY = 10000
+
+# 股票池（最多成交前50）
+most_active_stocks = [
+    "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA", "AMD", "NFLX", "BAC",
+    "JPM", "INTC", "XOM", "PFE", "T", "CSCO", "VZ", "WFC", "CVX", "QCOM",
+    "KO", "PEP", "MRNA", "C", "DIS", "F", "GM", "PYPL", "ABNB", "CRM",
+    "NKE", "BA", "BABA", "UBER", "ORCL", "ADBE", "SQ", "PLTR", "SNAP", "LYFT",
+    "GOOG", "SHOP", "TSM", "MU", "GE", "SOFI", "ROKU", "TWLO", "TWTR", "ZM"
+]
+
+# Sidebar 選項
+st.sidebar.header("參數設定")
+selected_tickers = st.sidebar.multiselect("選擇最多 5 隻股票", most_active_stocks, default=["PLTR"], max_selections=5)
+interval = st.sidebar.selectbox("數據頻率", ["1d", "1h"], index=0)
 start_date = st.sidebar.date_input("開始日期", value=datetime(2023, 1, 1))
 end_date = st.sidebar.date_input("結束日期", value=datetime.now())
 
-# 下載數據
-def load_data():
-    df = yf.download("PLTR", start=start_date, end=end_date, interval=interval)
+# SMA 測試範圍
+st.sidebar.markdown("---")
+st.sidebar.subheader("測試短期 / 長期 MA 組合")
+short_ma_range = st.sidebar.slider("短期 MA 範圍", 5, 100, (10, 50), step=10)
+long_ma_range = st.sidebar.slider("長期 MA 範圍", 20, 300, (60, 200), step=20)
+
+@st.cache_data
+def load_data(ticker):
+    df = yf.download(ticker, start=start_date, end=end_date, interval=interval)
+    if df.empty and interval == "1h":
+        df = yf.download(ticker, start=start_date, end=end_date, interval="1d")
     df.dropna(inplace=True)
     return df
 
-with st.spinner("下載資料中..."):
-    data = load_data()
-
-# 檢查是否成功下載
-if data.empty:
-    st.warning("下載不到 PLTR 資料，請更改日期或稍後再試。")
-    st.stop()
-
-st.subheader("PLTR 價格走勢")
-st.line_chart(data['Close'])
-
-# 回測邏輯
-def run_backtest(df, short_window, long_window):
+def sma_backtest(df, short_ma, long_ma):
     df = df.copy()
-    df['short_ma'] = df['Close'].rolling(window=short_window).mean()
-    df['long_ma'] = df['Close'].rolling(window=long_window).mean()
+    df['short_ma'] = df['Close'].rolling(window=short_ma).mean()
+    df['long_ma'] = df['Close'].rolling(window=long_ma).mean()
     df['signal'] = np.where(df['short_ma'] > df['long_ma'], 1, 0)
-    df['signal'] = df['signal'].fillna(0)
-    df['position'] = df['signal'].diff()
     df['returns'] = df['Close'].pct_change()
     df['strategy'] = df['returns'] * df['signal'].shift(1)
-    df['equity'] = (1 + df['strategy']).cumprod()
-    return df
+    df['equity'] = START_EQUITY * (1 + df['strategy']).cumprod()
 
-bt = run_backtest(data, short_window, long_window)
+    end_equity = df['equity'].iloc[-1]
+    final_return = (end_equity - START_EQUITY) / START_EQUITY
+    max_drawdown = (df['equity'].cummax() - df['equity']).max() / df['equity'].cummax().max()
+    annualized_return = df['strategy'].mean() * 252
+    annualized_volatility = df['strategy'].std() * np.sqrt(252)
+    sharpe_ratio = annualized_return / annualized_volatility if annualized_volatility != 0 else 0
 
-# 顯示最後幾行（debug 用）
-st.write("最近策略資料：")
-st.dataframe(bt.tail())
+    return {
+        "短期MA": short_ma,
+        "長期MA": long_ma,
+        "總報酬率": final_return,
+        "最大回撤": max_drawdown,
+        "Sharpe Ratio": sharpe_ratio
+    }
 
-# 繪圖
-st.subheader("交易信號")
-fig, ax = plt.subplots(figsize=(12, 6))
-ax.plot(bt.index, bt['Close'], label='Close')
-ax.plot(bt.index, bt['short_ma'], label=f'Short MA ({short_window})')
-ax.plot(bt.index, bt['long_ma'], label=f'Long MA ({long_window})')
-ax.plot(bt[bt['position'] == 1].index, bt['Close'][bt['position'] == 1], '^', markersize=10, color='g', label='Buy')
-ax.plot(bt[bt['position'] == -1].index, bt['Close'][bt['position'] == -1], 'v', markersize=10, color='r', label='Sell')
-ax.legend()
-st.pyplot(fig)
+# 執行每隻股票測試
+for ticker in selected_tickers:
+    st.header(f"最佳參數測試：{ticker}")
+    df = load_data(ticker)
+    if df.empty:
+        st.warning(f"{ticker} 無法下載資料")
+        continue
 
-# 報告（加防呆判斷）
-st.subheader("策略表現")
-if not bt['equity'].empty and bt['equity'].notna().any():
-    final_return = bt['equity'].iloc[-1] - 1
-    max_drawdown = (bt['equity'].cummax() - bt['equity']).max()
-    st.metric("總報酬率", f"{final_return:.2%}")
-    st.metric("最大回撤", f"{max_drawdown:.2%}")
-else:
-    st.warning("策略結果為空，可能是資料不足或參數過大，請調整後重試。")
+    result_list = []
+    for short_ma, long_ma in product(
+        range(short_ma_range[0], short_ma_range[1]+1, 10),
+        range(long_ma_range[0], long_ma_range[1]+1, 20)
+    ):
+        if short_ma >= long_ma:
+            continue
+        res = sma_backtest(df, short_ma, long_ma)
+        result_list.append(res)
+
+    results_df = pd.DataFrame(result_list)
+    results_df = results_df.sort_values(by="Sharpe Ratio", ascending=False)
+    st.dataframe(results_df.reset_index(drop=True))
