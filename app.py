@@ -26,10 +26,15 @@ def load_data():
 with st.spinner("下載資料中..."):
     data = load_data()
 
+# 檢查是否成功下載
+if data.empty:
+    st.warning("下載不到 PLTR 資料，請更改日期或稍後再試。")
+    st.stop()
+
 st.subheader("PLTR 價格走勢")
 st.line_chart(data['Close'])
 
-# 回測邏輯（修正過錯誤）
+# 回測邏輯
 def run_backtest(df, short_window, long_window):
     df = df.copy()
     df['short_ma'] = df['Close'].rolling(window=short_window).mean()
@@ -44,6 +49,10 @@ def run_backtest(df, short_window, long_window):
 
 bt = run_backtest(data, short_window, long_window)
 
+# 顯示最後幾行（debug 用）
+st.write("最近策略資料：")
+st.dataframe(bt.tail())
+
 # 繪圖
 st.subheader("交易信號")
 fig, ax = plt.subplots(figsize=(12, 6))
@@ -55,9 +64,12 @@ ax.plot(bt[bt['position'] == -1].index, bt['Close'][bt['position'] == -1], 'v', 
 ax.legend()
 st.pyplot(fig)
 
-# 報告
+# 報告（加防呆判斷）
 st.subheader("策略表現")
-final_return = bt['equity'].iloc[-1] - 1
-st.metric("總報酬率", f"{final_return:.2%}")
-max_drawdown = (bt['equity'].cummax() - bt['equity']).max()
-st.metric("最大回撤", f"{max_drawdown:.2%}")
+if not bt['equity'].empty and bt['equity'].notna().any():
+    final_return = bt['equity'].iloc[-1] - 1
+    max_drawdown = (bt['equity'].cummax() - bt['equity']).max()
+    st.metric("總報酬率", f"{final_return:.2%}")
+    st.metric("最大回撤", f"{max_drawdown:.2%}")
+else:
+    st.warning("策略結果為空，可能是資料不足或參數過大，請調整後重試。")
