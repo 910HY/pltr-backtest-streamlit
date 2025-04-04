@@ -29,13 +29,13 @@ with st.spinner("下載資料中..."):
 st.subheader("PLTR 價格走勢")
 st.line_chart(data['Close'])
 
-# 回測邏輯
+# 回測邏輯（修正過錯誤）
 def run_backtest(df, short_window, long_window):
     df = df.copy()
     df['short_ma'] = df['Close'].rolling(window=short_window).mean()
     df['long_ma'] = df['Close'].rolling(window=long_window).mean()
-    df['signal'] = 0
-    df.loc[short_window:, 'signal'] = np.where(df['short_ma'][short_window:] > df['long_ma'][short_window:], 1, 0)
+    df['signal'] = np.where(df['short_ma'] > df['long_ma'], 1, 0)
+    df['signal'] = df['signal'].fillna(0)
     df['position'] = df['signal'].diff()
     df['returns'] = df['Close'].pct_change()
     df['strategy'] = df['returns'] * df['signal'].shift(1)
